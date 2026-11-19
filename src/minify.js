@@ -12,6 +12,7 @@ export function minify(source) {
 		module: true,
 		toplevel: true,
 		compress: {
+			arrows: true,
 			passes: 100
 		},
 		mangle: true,

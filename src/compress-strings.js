@@ -2,6 +2,7 @@ import { brotliCompressSync, constants } from "node:zlib";
 import UglifyJS from "uglify-js";
 import { encodings } from "./encodings.js";
 import { minify, outputOptions } from "./minify.js";
+import { minifyStylesheets } from "./minify-css.js";
 
 const compressionOptions = {
 	params: {
@@ -12,9 +13,36 @@ const compressionOptions = {
 
 const runtimeGlobals = ["Response", "Blob", "Uint8Array", "DecompressionStream"];
 
-export function compressStrings(source) {
-	const ast = UglifyJS.parse(source, { module: true }),
-		names = new Set(),
+export async function compressStrings(source) {
+	let ast = UglifyJS.parse(source, { module: true });
+
+	const literals = new Set();
+
+	transformStrings(ast, value => {
+		literals.add(value);
+	}, true);
+
+	const stylesheets = await minifyStylesheets(literals);
+
+	if (stylesheets.size > 0) {
+		transformStrings(ast, value => {
+			const stylesheet = stylesheets.get(value);
+
+			if (stylesheet !== undefined) {
+				return new UglifyJS.AST_String({ value: stylesheet });
+			}
+		}, true);
+
+		const code = minify(ast);
+
+		if (Buffer.byteLength(code) < Buffer.byteLength(source)) {
+			source = code;
+		}
+
+		ast = UglifyJS.parse(source, { module: true });
+	}
+
+	const names = new Set(),
 		strings = new Map();
 
 	let moduleSyntax = false;
@@ -197,8 +225,21 @@ function buildVariant(ast, candidates, encoding, decoderName, moduleSyntax) {
 	return minify(transformed);
 }
 
-function transformStrings(ast, replace) {
+function transformStrings(ast, replace, cssOnly = false) {
 	return ast.transform(new UglifyJS.TreeTransformer(function(node, descend) {
+		if (cssOnly) {
+			if (node instanceof UglifyJS.AST_Template && (node.tag || node.expressions.length > 0)) {
+				return node;
+			}
+
+			const parent = this.parent(),
+				property = parent instanceof UglifyJS.AST_ObjectProperty || parent instanceof UglifyJS.AST_ClassProperty || parent instanceof UglifyJS.AST_DestructuredKeyVal;
+
+			if (property && parent.key === node || parent instanceof UglifyJS.AST_Sub && parent.property === node) {
+				return node;
+			}
+		}
+
 		descend(node, this);
 
 		if (node instanceof UglifyJS.AST_String) {
@@ -234,6 +275,10 @@ function transformStrings(ast, replace) {
 			}
 
 			return new UglifyJS.AST_Template({ strings: strings, expressions: expressions });
+		}
+
+		if (cssOnly) {
+			return node;
 		}
 
 		const property = node instanceof UglifyJS.AST_ObjectProperty || node instanceof UglifyJS.AST_ClassProperty || node instanceof UglifyJS.AST_DestructuredKeyVal,

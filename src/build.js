@@ -9,7 +9,7 @@ const input = Bun.file(new URL("../data/source.js", import.meta.url)),
 const source = await input.text(),
 	inputSize = input.size;
 
-const result = compressStrings(minify(source));
+const result = await compressStrings(minify(source));
 
 const outputSize = await Bun.write(output, result.code),
 	remaining = inputSize === 0 ? 0 : outputSize / inputSize * 100;
