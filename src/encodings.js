@@ -1,3 +1,5 @@
+const decompressBase64 = data => new Response(new Blob([Uint8Array.fromBase64(data)]).stream().pipeThrough(new DecompressionStream("brotli"))).text();
+
 export const encodings = [
 	{ name: "Base64", encode: bytes => bytes.toString("base64"), decode: decompressBase64 },
 	{ name: "Base85", encode: encodeBase85, decode: decompressBase85 }
@@ -29,12 +31,6 @@ function encodeBase85(bytes) {
 	}
 
 	return encoded.toString("ascii");
-}
-
-function decompressBase64(data) {
-	const bytes = Uint8Array.from(atob(data), character => character.charCodeAt(0));
-
-	return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("brotli"))).text();
 }
 
 function decompressBase85(data) {

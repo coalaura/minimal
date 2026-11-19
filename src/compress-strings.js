@@ -10,7 +10,7 @@ const compressionOptions = {
 	}
 };
 
-const runtimeGlobals = ["Response", "Blob", "Uint8Array", "DecompressionStream", "atob"];
+const runtimeGlobals = ["Response", "Blob", "Uint8Array", "DecompressionStream"];
 
 export function compressStrings(source) {
 	const ast = UglifyJS.parse(source, { module: true }),
