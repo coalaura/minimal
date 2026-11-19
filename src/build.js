@@ -1,4 +1,5 @@
-import UglifyJS from "uglify-js";
+import { compressStrings } from "./compress-strings.js";
+import { minify } from "./minify.js";
 
 const sizeUnits = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
 
@@ -8,24 +9,7 @@ const input = Bun.file(new URL("../data/source.js", import.meta.url)),
 const source = await input.text(),
 	inputSize = input.size;
 
-const result = UglifyJS.minify({ "source.js": source }, {
-	module: true,
-	toplevel: true,
-	compress: {
-		passes: 100
-	},
-	mangle: true,
-	output: {
-		beautify: false,
-		comments: false,
-		ascii_only: false,
-		inline_script: false
-	}
-});
-
-if (result.error) {
-	throw result.error;
-}
+const result = compressStrings(minify(source));
 
 const outputSize = await Bun.write(output, result.code),
 	remaining = inputSize === 0 ? 0 : outputSize / inputSize * 100;
@@ -33,6 +17,7 @@ const outputSize = await Bun.write(output, result.code),
 console.log(`Input: ${formatSize(inputSize)}`);
 console.log(`Output: ${formatSize(outputSize)}`);
 console.log(`Remaining: ${remaining.toFixed(2)}%`);
+console.log(`Strings: ${result.count} compressed${result.encoding ? ` (Brotli + ${result.encoding})` : ""}`);
 
 function formatSize(bytes) {
 	let size = bytes,
