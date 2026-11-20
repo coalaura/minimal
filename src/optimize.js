@@ -1,4 +1,4 @@
-import { compressStrings } from "./compress-strings.js";
+import { compressStrings, orderStringTable } from "./compress-strings.js";
 import { mangleProperties } from "./mangle-properties.js";
 import { minify } from "./minify.js";
 import { poolStrings } from "./pool-strings.js";
@@ -26,21 +26,39 @@ export async function optimize(source, compression) {
 async function optimizeStrings(source) {
 	const compressed = await compressStrings(source);
 
-	let best;
+	let best,
+		selected;
 
 	for (const variant of compressed.variants) {
-		const pooled = poolStrings(variant.code);
+		const result = finalizeStrings(variant);
 
-		if (!best || Buffer.byteLength(pooled.code) < Buffer.byteLength(best.code)) {
-			best = {
-				code: pooled.code,
-				count: variant.count,
-				encoding: variant.encoding,
-				strategy: variant.strategy,
-				pooled: pooled.count
-			};
+		if (!best || Buffer.byteLength(result.code) < Buffer.byteLength(best.code)) {
+			best = result;
+			selected = variant;
+		}
+	}
+
+	for (const variant of orderStringTable(selected)) {
+		const result = finalizeStrings(variant);
+
+		if (Buffer.byteLength(result.code) < Buffer.byteLength(best.code)) {
+			best = result;
 		}
 	}
 
 	return best;
+}
+
+function finalizeStrings(variant) {
+	const pooled = poolStrings(variant.code);
+
+	return {
+		code: pooled.code,
+		count: variant.count,
+		encoding: variant.encoding,
+		strategy: variant.strategy,
+		extraction: variant.extraction,
+		ordering: variant.ordering,
+		pooled: pooled.count
+	};
 }

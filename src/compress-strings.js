@@ -13,12 +13,19 @@ const compressionOptions = {
 
 const runtimeGlobals = ["Response", "Blob", "Uint8Array", "DecompressionStream"],
 	maximumIndividualTrials = 8,
+	maximumOrderingTrials = 2,
 	delimiters = ["|", "\0", "\x01", "\x02", "\x1F"];
 
 const sharedConfigurations = [
 	{ minimumLength: 16, includePooled: false },
 	{ minimumLength: 64, includePooled: false },
 	{ minimumLength: 16, includePooled: true }
+];
+
+const tableOrderings = [
+	{ name: "alphabetical", compare: compareEntries },
+	{ name: "suffix", compare: compareSuffixes },
+	{ name: "length", compare: (first, second) => first.value.length - second.value.length || compareEntries(first, second) }
 ];
 
 export async function compressStrings(source) {
@@ -212,26 +219,42 @@ export async function compressStrings(source) {
 
 		if (delimiter !== undefined) {
 			formats.push({ strategy: "delimiter/split", separator: delimiter });
+			formats.push({ strategy: "delimiter/split", separator: delimiter, destructure: true });
 		}
 
 		for (const format of formats) {
 			const compressed = brotliCompressSync(Buffer.from(values.join(format.separator)), compressionOptions),
-				strategy = configuration.includePooled ? `${format.strategy} + pooled strings` : format.strategy;
+				strategy = configuration.includePooled ? `${format.strategy} + pooled strings` : format.strategy,
+				extraction = format.destructure ? "destructured" : format.strategy === "delimiter/split" ? "indexed" : "slice",
+				key = `${strategy}:${extraction}`;
 
 			for (const encoding of encodings) {
 				const payload = new UglifyJS.AST_String({ value: encoding.encode(compressed) }),
 					code = buildSharedVariant(ast, entries, payload, encoding, decoderName, payloadName, sliceName, moduleSyntax, format),
-					previous = sharedVariants.get(strategy);
+					previous = sharedVariants.get(key);
 
 				if (Buffer.byteLength(code) >= Buffer.byteLength(previous ? previous.code : source)) {
 					continue;
 				}
 
-				sharedVariants.set(strategy, {
+				sharedVariants.set(key, {
 					code: code,
 					count: entries.length,
 					encoding: encoding.name,
-					strategy: strategy
+					strategy: strategy,
+					extraction: extraction,
+					ordering: "original",
+					table: {
+						ast: ast,
+						entries: entries,
+						compressed: compressed,
+						encoding: encoding,
+						decoderName: decoderName,
+						payloadName: payloadName,
+						sliceName: sliceName,
+						moduleSyntax: moduleSyntax,
+						format: format
+					}
 				});
 			}
 		}
@@ -246,6 +269,76 @@ export async function compressStrings(source) {
 	}
 
 	return { ...best, variants: variants };
+}
+
+export function orderStringTable(variant) {
+	if (!variant.table) {
+		return [];
+	}
+
+	const table = variant.table,
+		orders = [];
+
+	for (const ordering of tableOrderings) {
+		const entries = [...table.entries].sort(ordering.compare),
+			unchanged = entries.every((entry, index) => entry === table.entries[index]),
+			duplicate = orders.some(order => entries.every((entry, index) => entry === order.entries[index]));
+
+		if (unchanged || duplicate) {
+			continue;
+		}
+
+		const values = entries.map(entry => entry.value),
+			compressed = brotliCompressSync(Buffer.from(values.join(table.format.separator)), compressionOptions),
+			payload = new UglifyJS.AST_String({ value: table.encoding.encode(compressed) });
+
+		orders.push({
+			name: ordering.name,
+			entries: entries,
+			compressed: compressed,
+			bytes: Buffer.byteLength(payload.print_to_string(outputOptions))
+		});
+	}
+
+	// Rank cheaply by escaped payload size, then fully minify and pool only two alternatives.
+	orders.sort((first, second) => first.bytes - second.bytes);
+
+	return orders.slice(0, maximumOrderingTrials).map(order => tableVariant(variant, {
+		...table,
+		entries: order.entries,
+		compressed: order.compressed
+	}, order.name));
+}
+
+function tableVariant(variant, table, ordering) {
+	const payload = new UglifyJS.AST_String({ value: table.encoding.encode(table.compressed) }),
+		code = buildSharedVariant(table.ast, table.entries, payload, table.encoding, table.decoderName, table.payloadName, table.sliceName, table.moduleSyntax, table.format);
+
+	return {
+		...variant,
+		code: code,
+		encoding: table.encoding.name,
+		ordering: ordering,
+		table: table
+	};
+}
+
+function compareEntries(first, second) {
+	return first.value < second.value ? -1 : first.value > second.value ? 1 : 0;
+}
+
+function compareSuffixes(first, second) {
+	const length = Math.min(first.value.length, second.value.length);
+
+	for (let index = 1; index <= length; index++) {
+		const difference = first.value.charCodeAt(first.value.length - index) - second.value.charCodeAt(second.value.length - index);
+
+		if (difference !== 0) {
+			return difference;
+		}
+	}
+
+	return first.value.length - second.value.length;
 }
 
 function buildVariant(ast, candidates, encoding, decoderName, moduleSyntax) {
@@ -281,6 +374,24 @@ function buildSharedVariant(ast, entries, payload, encoding, decoderName, payloa
 			})
 		}),
 		split = format.strategy === "delimiter/split";
+
+	if (format.destructure) {
+		const elements = entries.map(entry => {
+			replacements.set(entry.value, entry.name);
+
+			return new UglifyJS.AST_SymbolConst({ name: entry.name });
+		});
+
+		definitions.push(new UglifyJS.AST_VarDef({
+			name: new UglifyJS.AST_DestructuredArray({ elements: elements }),
+			value: new UglifyJS.AST_Call({
+				expression: new UglifyJS.AST_Dot({ expression: decoded, property: "split" }),
+				args: [new UglifyJS.AST_String({ value: format.separator })]
+			})
+		}));
+
+		return buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax);
+	}
 
 	definitions.push(new UglifyJS.AST_VarDef({
 		name: new UglifyJS.AST_SymbolConst({ name: payloadName }),

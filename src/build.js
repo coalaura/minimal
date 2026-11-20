@@ -25,6 +25,12 @@ for (const candidate of result.candidates) {
 
 console.log(`Strings: ${result.count} compressed${result.encoding ? ` (Brotli + ${result.encoding})` : ""}`);
 console.log(`Storage: ${result.strategy ?? "plain strings"}`);
+
+if (result.extraction) {
+	console.log(`Extraction: ${result.extraction}`);
+	console.log(`Table order: ${result.ordering}`);
+}
+
 console.log(`Pooled: ${result.pooled} strings`);
 console.log(`Properties: ${result.properties} renamed`);
 console.log(`Build: ${((performance.now() - started) / 1000).toFixed(2)}s`);
