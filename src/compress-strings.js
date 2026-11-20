@@ -225,7 +225,7 @@ function buildVariant(ast, candidates, encoding, decoderName, moduleSyntax) {
 	return minify(transformed);
 }
 
-function transformStrings(ast, replace, cssOnly = false) {
+export function transformStrings(ast, replace, cssOnly = false) {
 	return ast.transform(new UglifyJS.TreeTransformer(function(node, descend) {
 		if (cssOnly) {
 			if (node instanceof UglifyJS.AST_Template && (node.tag || node.expressions.length > 0)) {
@@ -333,7 +333,7 @@ function decodeTemplate(raw) {
 	return UglifyJS.parse(`"${quoted}"`, { expression: true }).value;
 }
 
-function uniqueName(names, prefix) {
+export function uniqueName(names, prefix) {
 	let suffix = names.size,
 		name = `${prefix}${suffix}`;
 

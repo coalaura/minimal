@@ -1,5 +1,7 @@
 import { compressStrings } from "./compress-strings.js";
+import { mangleProperties } from "./mangle-properties.js";
 import { minify } from "./minify.js";
+import { poolStrings } from "./pool-strings.js";
 
 const sizeUnits = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
 
@@ -9,15 +11,33 @@ const input = Bun.file(new URL("../data/source.js", import.meta.url)),
 const source = await input.text(),
 	inputSize = input.size;
 
-const result = await compressStrings(minify(source));
+const baseline = minify(source),
+	mangled = mangleProperties(baseline);
 
-const outputSize = await Bun.write(output, result.code),
+let result = await compressStrings(baseline),
+	pooled = poolStrings(result.code),
+	propertyCount = 0;
+
+if (mangled.count > 0) {
+	const compressedCandidate = await compressStrings(mangled.code),
+		pooledCandidate = poolStrings(compressedCandidate.code);
+
+	if (Buffer.byteLength(pooledCandidate.code) < Buffer.byteLength(pooled.code)) {
+		result = compressedCandidate;
+		pooled = pooledCandidate;
+		propertyCount = mangled.count;
+	}
+}
+
+const outputSize = await Bun.write(output, pooled.code),
 	remaining = inputSize === 0 ? 0 : outputSize / inputSize * 100;
 
 console.log(`Input: ${formatSize(inputSize)}`);
 console.log(`Output: ${formatSize(outputSize)}`);
 console.log(`Remaining: ${remaining.toFixed(2)}%`);
 console.log(`Strings: ${result.count} compressed${result.encoding ? ` (Brotli + ${result.encoding})` : ""}`);
+console.log(`Pooled: ${pooled.count} strings`);
+console.log(`Properties: ${propertyCount} renamed`);
 
 function formatSize(bytes) {
 	let size = bytes,
