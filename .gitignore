@@ -1,3 +1,2 @@
 node_modules/
-data/source.min.js
-data/source.js
+data/*.js

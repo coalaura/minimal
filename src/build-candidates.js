@@ -3,8 +3,9 @@ import { Worker } from "node:worker_threads";
 
 const configurations = [
 	{ name: "default", compression: {} },
-	{ name: "hoist_funs", compression: { hoist_funs: true } },
-	{ name: "hoist_funs + hoist_vars", compression: { hoist_funs: true, hoist_vars: true } }
+	// UglifyJS 3.19.3 can move hoisted closures outside their bindings when rewriting early returns.
+	{ name: "hoist_funs, if_return: false", compression: { hoist_funs: true, if_return: false } },
+	{ name: "hoist_funs + hoist_vars, if_return: false", compression: { hoist_funs: true, hoist_vars: true, if_return: false } }
 ];
 
 const maximumWorkers = 3;
