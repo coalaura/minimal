@@ -6,6 +6,7 @@ const configurations = [
 	{ name: "hoist_funs", compression: { hoist_funs: true } },
 	{ name: "hoist_funs + hoist_vars", compression: { hoist_funs: true, hoist_vars: true } }
 ];
+
 const maximumWorkers = 3;
 
 export async function buildCandidates(source, concurrency = availableParallelism()) {
@@ -30,6 +31,7 @@ export async function buildCandidates(source, concurrency = availableParallelism
 				results[index] = await runCandidate(source, configuration, workers);
 			} catch (error) {
 				stopped = true;
+
 				throw new Error(`Uglify configuration "${configuration.name}" failed: ${error.message}`, { cause: error });
 			}
 		}
@@ -43,6 +45,7 @@ export async function buildCandidates(source, concurrency = availableParallelism
 		await Promise.all(tasks);
 	} finally {
 		stopped = true;
+
 		await Promise.all([...workers].map(worker => worker.terminate()));
 	}
 
@@ -88,6 +91,7 @@ async function runCandidate(source, configuration, workers) {
 		});
 	} finally {
 		await worker.terminate();
+
 		workers.delete(worker);
 	}
 }

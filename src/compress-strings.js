@@ -11,14 +11,15 @@ const compressionOptions = {
 	}
 };
 
-const runtimeGlobals = ["Response", "Blob", "Uint8Array", "DecompressionStream"];
+const runtimeGlobals = ["Response", "Blob", "Uint8Array", "DecompressionStream"],
+	maximumIndividualTrials = 8,
+	delimiters = ["|", "\0", "\x01", "\x02", "\x1F"];
+
 const sharedConfigurations = [
 	{ minimumLength: 16, includePooled: false },
 	{ minimumLength: 64, includePooled: false },
 	{ minimumLength: 16, includePooled: true }
 ];
-const maximumIndividualTrials = 8;
-const delimiters = ["|", "\0", "\x01", "\x02", "\x1F"];
 
 export async function compressStrings(source) {
 	let ast = UglifyJS.parse(source, { module: true });
@@ -54,7 +55,7 @@ export async function compressStrings(source) {
 
 	let moduleSyntax = false;
 
-	ast.walk(new UglifyJS.TreeWalker(function(node) {
+	ast.walk(new UglifyJS.TreeWalker(function (node) {
 		if (node instanceof UglifyJS.AST_Symbol) {
 			names.add(node.name);
 		}
@@ -363,7 +364,7 @@ function buildProgram(ast, replacements, definitions, encoding, decoderName, mod
 }
 
 export function transformStrings(ast, replace, cssOnly = false) {
-	return ast.transform(new UglifyJS.TreeTransformer(function(node, descend) {
+	return ast.transform(new UglifyJS.TreeTransformer(function (node, descend) {
 		if (cssOnly) {
 			if (node instanceof UglifyJS.AST_Template && (node.tag || node.expressions.length > 0)) {
 				return node;

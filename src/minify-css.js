@@ -72,6 +72,7 @@ function isStylesheet(value) {
 
 		if (character === "\\") {
 			index++;
+
 			continue;
 		}
 
@@ -85,6 +86,7 @@ function isStylesheet(value) {
 
 		if (character === '"' || character === "'") {
 			quote = character;
+
 			continue;
 		}
 
@@ -96,6 +98,7 @@ function isStylesheet(value) {
 			}
 
 			index = end + 1;
+
 			continue;
 		}
 
