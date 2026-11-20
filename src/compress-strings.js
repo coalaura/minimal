@@ -12,6 +12,13 @@ const compressionOptions = {
 };
 
 const runtimeGlobals = ["Response", "Blob", "Uint8Array", "DecompressionStream"];
+const sharedConfigurations = [
+	{ minimumLength: 16, includePooled: false },
+	{ minimumLength: 64, includePooled: false },
+	{ minimumLength: 16, includePooled: true }
+];
+const maximumIndividualTrials = 8;
+const delimiters = ["|", "\0", "\x01", "\x02", "\x1F"];
 
 export async function compressStrings(source) {
 	let ast = UglifyJS.parse(source, { module: true });
@@ -66,15 +73,18 @@ export async function compressStrings(source) {
 	let best = {
 		code: source,
 		count: 0,
-		encoding: null
+		encoding: null,
+		strategy: null
 	};
+
+	const variants = [best];
 
 	if (moduleSyntax) {
 		ast.figure_out_scope();
 
 		// A module cannot put its decoder outside the scope of these bindings.
 		if (runtimeGlobals.some(name => ast.variables.get(name))) {
-			return best;
+			return { ...best, variants: variants };
 		}
 	}
 
@@ -135,13 +145,16 @@ export async function compressStrings(source) {
 		}
 
 		let code = buildVariant(ast, candidates, encoding, decoderName, moduleSyntax),
-			changed = true;
+			changed = true,
+			trials = 0;
 
 		// Measure the complete minified program, including shared startup overhead.
-		while (changed && candidates.length > 0) {
+		while (changed && candidates.length > 0 && trials < maximumIndividualTrials) {
 			changed = false;
 
-			for (let index = candidates.length - 1; index >= 0; index--) {
+			for (let index = candidates.length - 1; index >= 0 && trials < maximumIndividualTrials; index--) {
+				trials++;
+
 				const trial = candidates.filter((candidate, position) => position !== index),
 					trialCode = trial.length === 0 ? source : buildVariant(ast, trial, encoding, decoderName, moduleSyntax);
 
@@ -157,12 +170,81 @@ export async function compressStrings(source) {
 			best = {
 				code: code,
 				count: candidates.length,
-				encoding: encoding.name
+				encoding: encoding.name,
+				strategy: "individual"
 			};
 		}
 	}
 
-	return best;
+	if (best.count > 0) {
+		variants.push(best);
+	}
+
+	const payloadName = uniqueName(names, "__payload"),
+		sliceName = uniqueName(names, "__slice"),
+		sharedVariants = new Map(),
+		sharedCounts = new Set(),
+		poolable = new Set();
+
+	for (const entry of strings.values()) {
+		// Short strings must also pay for table lookups and multi-character references.
+		const savings = poolingSavings(entry) - entry.count - 8;
+
+		if (entry.count > 1 && entry.value.length >= 4 && savings > 0) {
+			poolable.add(entry);
+		}
+	}
+
+	for (const configuration of sharedConfigurations) {
+		const entries = [...strings.values()].filter(entry => entry.value.length >= configuration.minimumLength || configuration.includePooled && poolable.has(entry));
+
+		if (entries.length < 2 || sharedCounts.has(entries.length)) {
+			continue;
+		}
+
+		// These candidate sets are nested, so equal counts mean identical contents.
+		sharedCounts.add(entries.length);
+
+		const values = entries.map(entry => entry.value),
+			delimiter = delimiters.find(candidate => values.every(value => !value.includes(candidate))),
+			formats = [{ strategy: "concat/slice", separator: "" }];
+
+		if (delimiter !== undefined) {
+			formats.push({ strategy: "delimiter/split", separator: delimiter });
+		}
+
+		for (const format of formats) {
+			const compressed = brotliCompressSync(Buffer.from(values.join(format.separator)), compressionOptions),
+				strategy = configuration.includePooled ? `${format.strategy} + pooled strings` : format.strategy;
+
+			for (const encoding of encodings) {
+				const payload = new UglifyJS.AST_String({ value: encoding.encode(compressed) }),
+					code = buildSharedVariant(ast, entries, payload, encoding, decoderName, payloadName, sliceName, moduleSyntax, format),
+					previous = sharedVariants.get(strategy);
+
+				if (Buffer.byteLength(code) >= Buffer.byteLength(previous ? previous.code : source)) {
+					continue;
+				}
+
+				sharedVariants.set(strategy, {
+					code: code,
+					count: entries.length,
+					encoding: encoding.name,
+					strategy: strategy
+				});
+			}
+		}
+	}
+
+	for (const variant of sharedVariants.values()) {
+		variants.push(variant);
+
+		if (Buffer.byteLength(variant.code) < Buffer.byteLength(best.code)) {
+			best = variant;
+		}
+	}
+
+	return { ...best, variants: variants };
 }
 
 function buildVariant(ast, candidates, encoding, decoderName, moduleSyntax) {
@@ -185,6 +267,61 @@ function buildVariant(ast, candidates, encoding, decoderName, moduleSyntax) {
 		}));
 	}
 
+	return buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax);
+}
+
+function buildSharedVariant(ast, entries, payload, encoding, decoderName, payloadName, sliceName, moduleSyntax, format) {
+	const replacements = new Map(),
+		definitions = [],
+		decoded = new UglifyJS.AST_Await({
+			expression: new UglifyJS.AST_Call({
+				expression: new UglifyJS.AST_SymbolRef({ name: decoderName }),
+				args: [payload]
+			})
+		}),
+		split = format.strategy === "delimiter/split";
+
+	definitions.push(new UglifyJS.AST_VarDef({
+		name: new UglifyJS.AST_SymbolConst({ name: payloadName }),
+		value: split ? new UglifyJS.AST_Call({
+			expression: new UglifyJS.AST_Dot({ expression: decoded, property: "split" }),
+			args: [new UglifyJS.AST_String({ value: format.separator })]
+		}) : decoded
+	}));
+
+	if (!split) {
+		definitions.push(new UglifyJS.AST_VarDef({
+			name: new UglifyJS.AST_SymbolConst({ name: sliceName }),
+			value: UglifyJS.parse(`(start,end)=>${payloadName}.slice(start,end)`, { expression: true })
+		}));
+	}
+
+	let offset = 0;
+
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index],
+			end = offset + entry.value.length;
+
+		replacements.set(entry.value, entry.name);
+		definitions.push(new UglifyJS.AST_VarDef({
+			name: new UglifyJS.AST_SymbolConst({ name: entry.name }),
+			value: split ? new UglifyJS.AST_Sub({
+				expression: new UglifyJS.AST_SymbolRef({ name: payloadName }),
+				property: new UglifyJS.AST_Number({ value: index })
+			}) : new UglifyJS.AST_Call({
+				expression: new UglifyJS.AST_SymbolRef({ name: sliceName }),
+				args: [new UglifyJS.AST_Number({ value: offset }), new UglifyJS.AST_Number({ value: end })]
+			})
+		}));
+
+		// String.length counts UTF-16 code units, matching the runtime slice offsets.
+		offset = end;
+	}
+
+	return buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax);
+}
+
+function buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax) {
 	const transformed = transformStrings(ast.clone(true), value => {
 		const name = replacements.get(value);
 
@@ -344,4 +481,11 @@ export function uniqueName(names, prefix) {
 	names.add(name);
 
 	return name;
+}
+
+export function poolingSavings(entry) {
+	const literal = new UglifyJS.AST_String({ value: entry.value }),
+		payloadBytes = Buffer.byteLength(literal.print_to_string(outputOptions));
+
+	return entry.literalBytes - payloadBytes - entry.count - 3;
 }

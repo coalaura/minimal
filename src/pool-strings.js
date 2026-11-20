@@ -1,6 +1,8 @@
 import UglifyJS from "uglify-js";
-import { transformStrings, uniqueName } from "./compress-strings.js";
+import { poolingSavings, transformStrings, uniqueName } from "./compress-strings.js";
 import { minify, outputOptions } from "./minify.js";
+
+const maximumPruningTrials = 8;
 
 export function poolStrings(source) {
 	const ast = UglifyJS.parse(source, { module: true }),
@@ -47,10 +49,7 @@ export function poolStrings(source) {
 	let candidates = [];
 
 	for (const entry of strings.values()) {
-		const literal = new UglifyJS.AST_String({ value: entry.value }),
-			payloadBytes = Buffer.byteLength(literal.print_to_string(outputOptions));
-
-		entry.savings = entry.literalBytes - payloadBytes - entry.count - 3;
+		entry.savings = poolingSavings(entry);
 
 		if (entry.count > 1 && entry.savings > 0) {
 			candidates.push(entry);
@@ -63,11 +62,14 @@ export function poolStrings(source) {
 		return { code: source, count: 0 };
 	}
 
-	let code = buildVariant(ast, candidates, moduleSyntax);
+	let code = buildVariant(ast, candidates, moduleSyntax),
+		trials = 0;
 
-	// Remove unprofitable groups first, then check individual bindings against the full output.
-	for (let size = Math.ceil(candidates.length / 2); size >= 1; size = Math.floor(size / 2)) {
-		for (let end = candidates.length; end > 0; end -= size) {
+	// Bound whole-program minifications; large string pools otherwise require hundreds of trials.
+	for (let size = Math.ceil(candidates.length / 2); size >= 1 && trials < maximumPruningTrials; size = Math.floor(size / 2)) {
+		for (let end = candidates.length; end > 0 && trials < maximumPruningTrials; end -= size) {
+			trials++;
+
 			const start = Math.max(0, end - size),
 				trial = candidates.filter((entry, index) => index < start || index >= end),
 				trialCode = trial.length === 0 ? source : buildVariant(ast, trial, moduleSyntax);
