@@ -7,13 +7,14 @@ export const outputOptions = {
 	inline_script: false
 };
 
-export function minify(source) {
+export function minify(source, compression) {
 	const result = UglifyJS.minify(source, {
 		module: true,
 		toplevel: true,
 		compress: {
 			arrows: true,
-			passes: 100
+			passes: 100,
+			...compression
 		},
 		mangle: true,
 		output: outputOptions

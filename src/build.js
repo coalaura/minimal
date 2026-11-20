@@ -1,7 +1,4 @@
-import { compressStrings } from "./compress-strings.js";
-import { mangleProperties } from "./mangle-properties.js";
-import { minify } from "./minify.js";
-import { poolStrings } from "./pool-strings.js";
+import { buildCandidates } from "./build-candidates.js";
 
 const sizeUnits = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
 
@@ -11,20 +8,8 @@ const input = Bun.file(new URL("../data/source.js", import.meta.url)),
 const source = await input.text(),
 	inputSize = input.size;
 
-const baseline = minify(source),
-	mangled = mangleProperties(baseline);
-
-let result = await optimizeStrings(baseline),
-	propertyCount = 0;
-
-if (mangled.count > 0) {
-	const candidate = await optimizeStrings(mangled.code);
-
-	if (Buffer.byteLength(candidate.code) < Buffer.byteLength(result.code)) {
-		result = candidate;
-		propertyCount = mangled.count;
-	}
-}
+const started = performance.now(),
+	result = await buildCandidates(source);
 
 const outputSize = await Bun.write(output, result.code),
 	remaining = inputSize === 0 ? 0 : outputSize / inputSize * 100;
@@ -32,32 +17,17 @@ const outputSize = await Bun.write(output, result.code),
 console.log(`Input: ${formatSize(inputSize)}`);
 console.log(`Output: ${formatSize(outputSize)}`);
 console.log(`Remaining: ${remaining.toFixed(2)}%`);
+console.log(`Configurations: ${result.candidates.length} (${result.workers} workers)`);
+
+for (const candidate of result.candidates) {
+	console.log(`  ${candidate.name}: ${formatSize(candidate.bytes)}${candidate.name === result.configuration ? " (selected)" : ""}`);
+}
+
 console.log(`Strings: ${result.count} compressed${result.encoding ? ` (Brotli + ${result.encoding})` : ""}`);
 console.log(`Storage: ${result.strategy ?? "plain strings"}`);
 console.log(`Pooled: ${result.pooled} strings`);
-console.log(`Properties: ${propertyCount} renamed`);
-
-async function optimizeStrings(source) {
-	const compressed = await compressStrings(source);
-
-	let best;
-
-	for (const variant of compressed.variants) {
-		const pooled = poolStrings(variant.code);
-
-		if (!best || Buffer.byteLength(pooled.code) < Buffer.byteLength(best.code)) {
-			best = {
-				code: pooled.code,
-				count: variant.count,
-				encoding: variant.encoding,
-				strategy: variant.strategy,
-				pooled: pooled.count
-			};
-		}
-	}
-
-	return best;
-}
+console.log(`Properties: ${result.properties} renamed`);
+console.log(`Build: ${((performance.now() - started) / 1000).toFixed(2)}s`);
 
 function formatSize(bytes) {
 	let size = bytes,
