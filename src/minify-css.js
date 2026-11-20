@@ -1,6 +1,6 @@
 const stylesheetStart = /^\s*(?:\/\*[\s\S]*?\*\/\s*)*(?:[.#:\[*@]|[a-z_-][\w-]*(?=[\s.#:\[{>+~|]))/i;
 
-export async function minifyStylesheets(values) {
+export async function minifyStylesheets(values, options = {}) {
 	const replacements = new Map();
 
 	for (const value of values) {
@@ -46,7 +46,7 @@ export async function minifyStylesheets(values) {
 
 		const minified = (await result.outputs[0].text()).trim();
 
-		if (Buffer.byteLength(minified) < Buffer.byteLength(value)) {
+		if (minified !== value && (options.keepLarger || Buffer.byteLength(minified) < Buffer.byteLength(value))) {
 			replacements.set(value, minified);
 		}
 	}

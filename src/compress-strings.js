@@ -28,19 +28,32 @@ const tableOrderings = [
 	{ name: "length", compare: (first, second) => first.value.length - second.value.length || compareEntries(first, second) }
 ];
 
-export async function compressStrings(source) {
-	let ast = UglifyJS.parse(source, { module: true });
+const frequencyOrdering = {
+	name: "frequency",
+	compare: (first, second) => second.count - first.count || compareEntries(first, second)
+};
 
-	const literals = new Set();
+export async function compressStrings(source, options = {}) {
+	let ast = UglifyJS.parse(source, { module: true }),
+		cssAlternative;
+
+	const originalSource = source,
+		cssAlternatives = [],
+		literals = new Set();
 
 	transformStrings(ast, value => {
 		literals.add(value);
 	}, true);
 
-	const stylesheets = await minifyStylesheets(literals);
+	const stylesheets = options.css === "original" ? new Map() : await minifyStylesheets(literals, { keepLarger: true });
 
 	if (stylesheets.size > 0) {
-		transformStrings(ast, value => {
+		const minifiedAST = ast.clone(true);
+
+		let legacyChanged = false,
+			allSmaller = true;
+
+		transformStrings(minifiedAST, value => {
 			const stylesheet = stylesheets.get(value);
 
 			if (stylesheet !== undefined) {
@@ -48,13 +61,40 @@ export async function compressStrings(source) {
 			}
 		}, true);
 
-		const code = minify(ast);
+		transformStrings(ast, value => {
+			const stylesheet = stylesheets.get(value);
 
-		if (Buffer.byteLength(code) < Buffer.byteLength(source)) {
+			if (stylesheet === undefined) {
+				return;
+			}
+
+			if (Buffer.byteLength(stylesheet) < Buffer.byteLength(value)) {
+				legacyChanged = true;
+
+				return new UglifyJS.AST_String({ value: stylesheet });
+			}
+
+			allSmaller = false;
+		}, true);
+
+		const code = legacyChanged ? minify(ast) : source,
+			minifiedCode = allSmaller ? code : minify(minifiedAST);
+
+		if (options.css === "minified") {
+			source = minifiedCode;
+		} else if (Buffer.byteLength(code) < Buffer.byteLength(source)) {
 			source = code;
 		}
 
 		ast = UglifyJS.parse(source, { module: true });
+
+		for (const alternative of new Set([originalSource, code, minifiedCode])) {
+			if (alternative !== source) {
+				cssAlternatives.push(alternative);
+			}
+		}
+
+		cssAlternative = cssAlternatives[0];
 	}
 
 	const names = new Set(),
@@ -85,14 +125,15 @@ export async function compressStrings(source) {
 		strategy: null
 	};
 
-	const variants = [best];
+	const variants = [best],
+		searchCandidates = [best];
 
 	if (moduleSyntax) {
 		ast.figure_out_scope();
 
 		// A module cannot put its decoder outside the scope of these bindings.
 		if (runtimeGlobals.some(name => ast.variables.get(name))) {
-			return { ...best, variants: variants };
+			return { ...best, variants: variants, candidates: searchCandidates, cssAlternative: cssAlternative, cssAlternatives: cssAlternatives };
 		}
 	}
 
@@ -182,6 +223,8 @@ export async function compressStrings(source) {
 				strategy: "individual"
 			};
 		}
+
+		searchCandidates.push({ code: code, count: candidates.length, encoding: encoding.name, strategy: "individual" });
 	}
 
 	if (best.count > 0) {
@@ -233,11 +276,7 @@ export async function compressStrings(source) {
 					code = buildSharedVariant(ast, entries, payload, encoding, decoderName, payloadName, sliceName, moduleSyntax, format),
 					previous = sharedVariants.get(key);
 
-				if (Buffer.byteLength(code) >= Buffer.byteLength(previous ? previous.code : source)) {
-					continue;
-				}
-
-				sharedVariants.set(key, {
+				const variant = {
 					code: code,
 					count: entries.length,
 					encoding: encoding.name,
@@ -247,6 +286,7 @@ export async function compressStrings(source) {
 					table: {
 						ast: ast,
 						entries: entries,
+						universe: [...strings.values()],
 						compressed: compressed,
 						encoding: encoding,
 						decoderName: decoderName,
@@ -255,7 +295,13 @@ export async function compressStrings(source) {
 						moduleSyntax: moduleSyntax,
 						format: format
 					}
-				});
+				};
+
+				searchCandidates.push(variant);
+
+				if (Buffer.byteLength(code) < Buffer.byteLength(previous ? previous.code : source)) {
+					sharedVariants.set(key, variant);
+				}
 			}
 		}
 	}
@@ -268,18 +314,19 @@ export async function compressStrings(source) {
 		}
 	}
 
-	return { ...best, variants: variants };
+	return { ...best, variants: variants, candidates: searchCandidates, cssAlternative: cssAlternative, cssAlternatives: cssAlternatives };
 }
 
-export function orderStringTable(variant) {
+export function orderStringTable(variant, limit = maximumOrderingTrials, frequency = false) {
 	if (!variant.table) {
 		return [];
 	}
 
 	const table = variant.table,
-		orders = [];
+		orders = [],
+		orderings = frequency ? [frequencyOrdering, ...tableOrderings] : tableOrderings;
 
-	for (const ordering of tableOrderings) {
+	for (const ordering of orderings) {
 		const entries = [...table.entries].sort(ordering.compare),
 			unchanged = entries.every((entry, index) => entry === table.entries[index]),
 			duplicate = orders.some(order => entries.every((entry, index) => entry === order.entries[index]));
@@ -301,13 +348,32 @@ export function orderStringTable(variant) {
 	}
 
 	// Rank cheaply by escaped payload size, then fully minify and pool only two alternatives.
-	orders.sort((first, second) => first.bytes - second.bytes);
+	if (!frequency) {
+		orders.sort((first, second) => first.bytes - second.bytes);
+	}
 
-	return orders.slice(0, maximumOrderingTrials).map(order => tableVariant(variant, {
+	return orders.slice(0, limit).map(order => tableVariant(variant, {
 		...table,
 		entries: order.entries,
 		compressed: order.compressed
 	}, order.name));
+}
+
+export function changeStringTable(variant, entries = variant.table.entries, format = variant.table.format) {
+	const table = variant.table,
+		values = entries.map(entry => entry.value),
+		separator = format.strategy === "delimiter/split" ? delimiters.find(candidate => values.every(value => !value.includes(candidate))) : "";
+
+	if (entries.length === 0 || separator === undefined) {
+		return;
+	}
+
+	return tableVariant(variant, {
+		...table,
+		entries: entries,
+		format: { ...format, separator: separator, contextual: true },
+		compressed: brotliCompressSync(Buffer.from(values.join(separator)), compressionOptions)
+	}, variant.ordering);
 }
 
 function tableVariant(variant, table, ordering) {
@@ -317,6 +383,8 @@ function tableVariant(variant, table, ordering) {
 	return {
 		...variant,
 		code: code,
+		count: table.entries.length,
+		extraction: table.format.mixed ? "mixed" : table.format.direct ? "direct" : variant.extraction,
 		encoding: table.encoding.name,
 		ordering: ordering,
 		table: table
@@ -390,7 +458,7 @@ function buildSharedVariant(ast, entries, payload, encoding, decoderName, payloa
 			})
 		}));
 
-		return buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax);
+		return buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax, format.contextual);
 	}
 
 	definitions.push(new UglifyJS.AST_VarDef({
@@ -414,31 +482,44 @@ function buildSharedVariant(ast, entries, payload, encoding, decoderName, payloa
 		const entry = entries[index],
 			end = offset + entry.value.length;
 
+		const lookup = split ? new UglifyJS.AST_Sub({
+			expression: new UglifyJS.AST_SymbolRef({ name: payloadName }),
+			property: new UglifyJS.AST_Number({ value: index })
+		}) : new UglifyJS.AST_Call({
+			expression: new UglifyJS.AST_SymbolRef({ name: sliceName }),
+			args: [new UglifyJS.AST_Number({ value: offset }), new UglifyJS.AST_Number({ value: end })]
+		});
+
+		if (split && (format.direct || format.mixed && entry.count < format.mixed)) {
+			replacements.set(entry.value, lookup);
+			offset = end;
+
+			continue;
+		}
+
 		replacements.set(entry.value, entry.name);
 		definitions.push(new UglifyJS.AST_VarDef({
 			name: new UglifyJS.AST_SymbolConst({ name: entry.name }),
-			value: split ? new UglifyJS.AST_Sub({
-				expression: new UglifyJS.AST_SymbolRef({ name: payloadName }),
-				property: new UglifyJS.AST_Number({ value: index })
-			}) : new UglifyJS.AST_Call({
-				expression: new UglifyJS.AST_SymbolRef({ name: sliceName }),
-				args: [new UglifyJS.AST_Number({ value: offset }), new UglifyJS.AST_Number({ value: end })]
-			})
+			value: lookup
 		}));
 
 		// String.length counts UTF-16 code units, matching the runtime slice offsets.
 		offset = end;
 	}
 
-	return buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax);
+	return buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax, format.contextual);
 }
 
-function buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax) {
-	const transformed = transformStrings(ast.clone(true), value => {
-		const name = replacements.get(value);
+function buildProgram(ast, replacements, definitions, encoding, decoderName, moduleSyntax, contextual = false) {
+	const transformed = transformStrings(ast.clone(true), (value, literal, context) => {
+		const replacement = replacements.get(value);
 
-		if (name) {
-			return new UglifyJS.AST_SymbolRef({ name: name });
+		if (replacement) {
+			const expression = typeof replacement === "string" ? new UglifyJS.AST_SymbolRef({ name: replacement }) : replacement.clone(true);
+
+			if (!contextual || replacementSavings(value, literal, expression, context) > 0) {
+				return expression;
+			}
 		}
 	});
 
@@ -476,6 +557,10 @@ function buildProgram(ast, replacements, definitions, encoding, decoderName, mod
 
 export function transformStrings(ast, replace, cssOnly = false) {
 	return ast.transform(new UglifyJS.TreeTransformer(function (node, descend) {
+		if (node instanceof UglifyJS.AST_Import || node instanceof UglifyJS.AST_ExportForeign) {
+			return node;
+		}
+
 		if (cssOnly) {
 			if (node instanceof UglifyJS.AST_Template && (node.tag || node.expressions.length > 0)) {
 				return node;
@@ -492,11 +577,11 @@ export function transformStrings(ast, replace, cssOnly = false) {
 		descend(node, this);
 
 		if (node instanceof UglifyJS.AST_String) {
-			return replace(node.value, node) ?? node;
+			return replace(node.value, node, "literal") ?? node;
 		}
 
 		if (node instanceof UglifyJS.AST_Template && !node.tag) {
-			const replacements = node.strings.map(raw => replace(decodeTemplate(raw), new UglifyJS.AST_Template({ strings: [raw], expressions: [] })));
+			const replacements = node.strings.map(raw => replace(decodeTemplate(raw), new UglifyJS.AST_Template({ strings: [raw], expressions: [] }), node.expressions.length > 0 ? "template" : "literal"));
 
 			if (!replacements.some(Boolean)) {
 				return node;
@@ -534,7 +619,7 @@ export function transformStrings(ast, replace, cssOnly = false) {
 			constructor = node instanceof UglifyJS.AST_ClassProperty && node.key === "constructor";
 
 		if (property && typeof node.key === "string" && node.key !== "__proto__" && !node.key.startsWith("#") && !constructor) {
-			const replacement = replace(node.key, new UglifyJS.AST_String({ value: node.key }));
+			const replacement = replace(node.key, new UglifyJS.AST_String({ value: node.key }), "key");
 
 			if (replacement) {
 				node.key = replacement;
@@ -542,7 +627,7 @@ export function transformStrings(ast, replace, cssOnly = false) {
 		}
 
 		if (node instanceof UglifyJS.AST_Dot && !node.property.startsWith("#")) {
-			const replacement = replace(node.property, new UglifyJS.AST_String({ value: node.property }));
+			const replacement = replace(node.property, new UglifyJS.AST_String({ value: node.property }), "dot");
 
 			if (replacement) {
 				return new UglifyJS.AST_Sub({
@@ -555,6 +640,35 @@ export function transformStrings(ast, replace, cssOnly = false) {
 
 		return node;
 	}));
+}
+
+export function replacementSavings(value, literal, replacement, context) {
+	// Generated bindings normally receive one or two ASCII bytes. Use two during
+	// candidate construction; complete emitted bytes decide every accepted trial.
+	const expression = replacement.clone(true).transform(new UglifyJS.TreeTransformer(node => {
+		if (node instanceof UglifyJS.AST_SymbolRef) {
+			return new UglifyJS.AST_SymbolRef({ name: "aa" });
+		}
+	}));
+
+	let original = Buffer.byteLength(literal.print_to_string(outputOptions)),
+		cost = Buffer.byteLength(expression.print_to_string(outputOptions));
+
+	if (context === "dot") {
+		original = Buffer.byteLength(value) + 1;
+		cost += 2;
+	} else if (context === "key") {
+		const property = new UglifyJS.AST_ObjectKeyVal({ key: value, value: new UglifyJS.AST_Number({ value: 0 }) }),
+			object = new UglifyJS.AST_Object({ properties: [property] });
+
+		original = Buffer.byteLength(object.print_to_string(outputOptions)) - 4;
+		cost += 2;
+	} else if (context === "template") {
+		original -= 2;
+		cost += 3;
+	}
+
+	return original - cost;
 }
 
 function decodeTemplate(raw) {

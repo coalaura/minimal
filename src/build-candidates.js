@@ -10,7 +10,7 @@ const configurations = [
 
 const maximumWorkers = 3;
 
-export async function buildCandidates(source, concurrency = availableParallelism()) {
+export async function buildCandidates(source, concurrency = availableParallelism(), options = {}) {
 	if (!Number.isInteger(concurrency) || concurrency < 1) {
 		throw new RangeError("Worker concurrency must be a positive integer");
 	}
@@ -29,7 +29,7 @@ export async function buildCandidates(source, concurrency = availableParallelism
 				configuration = configurations[index];
 
 			try {
-				results[index] = await runCandidate(source, configuration, workers);
+				results[index] = await runCandidate(source, configuration, workers, options);
 			} catch (error) {
 				stopped = true;
 
@@ -72,11 +72,12 @@ export async function buildCandidates(source, concurrency = availableParallelism
 	};
 }
 
-async function runCandidate(source, configuration, workers) {
+async function runCandidate(source, configuration, workers, options) {
 	const worker = new Worker(new URL("./optimize-worker.js", import.meta.url), {
 		workerData: {
 			source: source,
-			compression: configuration.compression
+			compression: configuration.compression,
+			options: options
 		}
 	});
 

@@ -1,0 +1,50 @@
+diff --git a/lib/compress.js b/lib/compress.js
+--- a/lib/compress.js
++++ b/lib/compress.js
+@@ -7103,6 +7103,9 @@
+             } else if (node instanceof AST_Unary) {
+                 if (node.write_only) sym = extract_reference(node.expression, props);
+             }
++            // An unused local alias can still mutate a live object. Do not infer
++            // property-write liveness from the liveness of that binding alone.
++            if (nested) return;
+             if (!(sym instanceof AST_SymbolRef)) return;
+             var def = sym.definition();
+             if (export_defaults[def.id]) return;
+diff --git a/lib/minify.js b/lib/minify.js
+--- a/lib/minify.js
++++ b/lib/minify.js
+@@ -113,6 +113,7 @@
+         var quoted_props;
+         if (options.mangle) {
+             options.mangle = defaults(options.mangle, {
++                byte_weighted: false,
+                 cache: options.nameCache && (options.nameCache.vars || {}),
+                 eval: false,
+                 ie: false,
+diff --git a/lib/scope.js b/lib/scope.js
+--- a/lib/scope.js
++++ b/lib/scope.js
+@@ -604,6 +604,7 @@
+ 
+ function _default_mangler_options(options) {
+     options = defaults(options, {
++        byte_weighted: false,
+         eval        : false,
+         ie          : false,
+         keep_fargs  : false,
+@@ -672,7 +673,13 @@
+                 sym.scope = node;
+                 sym.reference(options);
+             }
+-            if (to_mangle.length > cutoff) {
++            if (options.byte_weighted) {
++                // On a freshly parsed final program, these are emitted occurrences.
++                // Generated names are ASCII, so every extra character costs one byte.
++                to_mangle.sort(function(a, b) {
++                    return b.references.length + b.orig.length - a.references.length - a.orig.length;
++                });
++            } else if (to_mangle.length > cutoff) {
+                 var indices = to_mangle.map(function(def, index) {
+                     return index;
+                 }).sort(function(i, j) {

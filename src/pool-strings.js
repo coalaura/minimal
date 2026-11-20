@@ -1,10 +1,10 @@
 import UglifyJS from "uglify-js";
-import { poolingSavings, transformStrings, uniqueName } from "./compress-strings.js";
+import { poolingSavings, replacementSavings, transformStrings, uniqueName } from "./compress-strings.js";
 import { minify, outputOptions } from "./minify.js";
 
 const maximumPruningTrials = 8;
 
-export function poolStrings(source) {
+export function poolStrings(source, options = {}) {
 	const ast = UglifyJS.parse(source, { module: true }),
 		names = new Set(),
 		strings = new Map();
@@ -62,33 +62,41 @@ export function poolStrings(source) {
 		return { code: source, count: 0 };
 	}
 
-	let code = buildVariant(ast, candidates, moduleSyntax),
+	const score = options.score ?? (code => Buffer.byteLength(code)),
+		trialLimit = options.trialLimit ?? maximumPruningTrials;
+
+	let code = buildVariant(ast, candidates, moduleSyntax, options.contextual),
 		trials = 0;
 
 	// Bound whole-program minifications; large string pools otherwise require hundreds of trials.
-	for (let size = Math.ceil(candidates.length / 2); size >= 1 && trials < maximumPruningTrials; size = Math.floor(size / 2)) {
-		for (let end = candidates.length; end > 0 && trials < maximumPruningTrials; end -= size) {
+	for (let size = Math.ceil(candidates.length / 2); size >= 1 && trials < trialLimit; size = Math.floor(size / 2)) {
+		for (let end = candidates.length; end > 0 && trials < trialLimit; end -= size) {
 			trials++;
 
 			const start = Math.max(0, end - size),
 				trial = candidates.filter((entry, index) => index < start || index >= end),
-				trialCode = trial.length === 0 ? source : buildVariant(ast, trial, moduleSyntax);
+				trialCode = trial.length === 0 ? source : buildVariant(ast, trial, moduleSyntax, options.contextual);
 
-			if (Buffer.byteLength(trialCode) <= Buffer.byteLength(code)) {
+			if (score(trialCode) <= score(code)) {
 				candidates = trial;
 				code = trialCode;
+
+				if (options.contextual) {
+					// Restart from the changed pool: marginal savings are not additive.
+					end = candidates.length + size;
+				}
 			}
 		}
 	}
 
-	if (Buffer.byteLength(code) >= Buffer.byteLength(source)) {
+	if (score(code) >= score(source)) {
 		return { code: source, count: 0 };
 	}
 
 	return { code: code, count: candidates.length };
 }
 
-function buildVariant(ast, candidates, moduleSyntax) {
+function buildVariant(ast, candidates, moduleSyntax, contextual = false) {
 	const replacements = new Map(),
 		definitions = [];
 
@@ -101,11 +109,15 @@ function buildVariant(ast, candidates, moduleSyntax) {
 		}));
 	}
 
-	const transformed = transformStrings(ast.clone(true), value => {
+	const transformed = transformStrings(ast.clone(true), (value, literal, context) => {
 		const name = replacements.get(value);
 
 		if (name) {
-			return new UglifyJS.AST_SymbolRef({ name: name });
+			const replacement = new UglifyJS.AST_SymbolRef({ name: name });
+
+			if (!contextual || replacementSavings(value, literal, replacement, context) > 0) {
+				return replacement;
+			}
 		}
 	});
 

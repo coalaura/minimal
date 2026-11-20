@@ -14,8 +14,8 @@ const started = performance.now(),
 const outputSize = await Bun.write(output, result.code),
 	remaining = inputSize === 0 ? 0 : outputSize / inputSize * 100;
 
-console.log(`Input: ${formatSize(inputSize)}`);
-console.log(`Output: ${formatSize(outputSize)}`);
+console.log(`Input: ${formatSize(inputSize)} (${inputSize} bytes)`);
+console.log(`Output: ${formatSize(outputSize)} (${outputSize} bytes)`);
 console.log(`Remaining: ${remaining.toFixed(2)}%`);
 console.log(`Configurations: ${result.candidates.length} (${result.workers} workers)`);
 
@@ -33,6 +33,9 @@ if (result.extraction) {
 
 console.log(`Pooled: ${result.pooled} strings`);
 console.log(`Properties: ${result.properties} renamed`);
+console.log(`Identifiers: ${result.allocation}`);
+console.log(`Fallback: ${result.fallbackBytes} bytes`);
+console.log(`Search: ${result.finalized} finalized candidates; budgets ${JSON.stringify(result.search)}`);
 console.log(`Build: ${((performance.now() - started) / 1000).toFixed(2)}s`);
 
 function formatSize(bytes) {

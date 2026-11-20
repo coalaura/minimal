@@ -2,9 +2,15 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"build": "bun run src/build.js"
+		"build": "bun run src/build.js",
+		"run": "bun run src/build.js",
+		"test": "bun test",
+		"benchmark": "bun run tests/benchmark.js"
 	},
 	"devDependencies": {
-		"uglify-js": "^3.19.3"
+		"uglify-js": "3.19.3"
+	},
+	"patchedDependencies": {
+		"uglify-js@3.19.3": "patches/uglify-js@3.19.3.patch"
 	}
 }
